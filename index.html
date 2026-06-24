@@ -160,7 +160,7 @@ body::after{content:"";position:fixed;inset:0;z-index:1;pointer-events:none;opac
 </head>
 <body>
 <canvas id="bgCanvas" aria-hidden="true"></canvas>
-<div id="ytHost" style="position:fixed;width:1px;height:1px;left:-9999px;top:-9999px;opacity:0;pointer-events:none"></div>
+<div id="ytHost" style="position:fixed;width:320px;height:180px;left:0;bottom:0;opacity:0.001;pointer-events:none;z-index:-1"></div>
 
 <div class="stage">
   <div class="orb-wrap" id="orbWrap">
@@ -544,7 +544,7 @@ const YT_ENGINE=(function(){
   let player=null, ready=false, pending=null, playing=false, raf=null;
   let curDur=0, fakeFreq=new Uint8Array(64), fakeTime=new Uint8Array(64);
   const energy={bass:0,mid:0,treble:0,level:0};
-  let beatPhase=0;
+  let beatPhase=0, wantPlay=false;
 
   // load the IFrame API
   const tag=document.createElement('script');
@@ -552,52 +552,63 @@ const YT_ENGINE=(function(){
   document.head.appendChild(tag);
   window.onYouTubeIframeAPIReady=function(){
     player=new YT.Player('ytHost',{
-      height:'1',width:'1',
-      playerVars:{autoplay:0,controls:0,disablekb:1,modestbranding:1,playsinline:1,rel:0},
+      height:'180',width:'320',
+      playerVars:{autoplay:1,controls:0,disablekb:1,modestbranding:1,playsinline:1,rel:0,fs:0},
       events:{
         'onReady':()=>{ready=true;if(pending){const p=pending;pending=null;cue(p.s);}},
+        'onError':e=>{ // 100/101/150 = blocked/embedding disabled -> skip to next result
+          setStatus('that one wouldn’t play — try roll again');
+        },
         'onStateChange':e=>{
-          if(e.data===YT.PlayerState.PLAYING){playing=true;startLoop();}
-          else if(e.data===YT.PlayerState.PAUSED||e.data===YT.PlayerState.ENDED){playing=false;}
+          if(e.data===YT.PlayerState.PLAYING){
+            playing=true;
+            // unmute now that it's actually rolling (autoplay needs muted start)
+            try{player.unMute();player.setVolume(100);}catch(_){}
+            setStatus('the real track, dropped into the middle');
+            startLoop();
+          } else if(e.data===YT.PlayerState.PAUSED||e.data===YT.PlayerState.ENDED){
+            playing=false;
+          } else if(e.data===YT.PlayerState.CUED){
+            if(wantPlay){try{player.playVideo();}catch(_){}}
+          }
         }
       }
     });
   };
 
-  // build a query that strongly favors the official studio recording
-  function query(s){
-    // "Artist Title official audio" — YT weights this toward Topic / official uploads
-    return s.artist+' '+s.title+' official audio';
-  }
+  function setStatus(t){const el=document.getElementById('ptime');if(el)el.textContent=t;}
+
+  function query(s){return s.artist+' '+s.title+' official audio';}
 
   function cue(s){
-    if(!ready){pending={s};return;}
+    wantPlay=true;
+    if(!ready){pending={s};setStatus('summoning the track…');return;}
     try{
+      setStatus('summoning the track…');
+      // muted start satisfies browser autoplay policy; we unmute on PLAYING
+      try{player.mute();}catch(_){}
       player.loadPlaylist({listType:'search',list:query(s),index:0,suggestedQuality:'small'});
-      // jump to the middle once it starts; poll until duration known
       let tries=0;
       const seek=setInterval(()=>{
         tries++;
-        const d=player.getDuration&&player.getDuration();
+        let d=0;try{d=player.getDuration();}catch(_){}
         if(d&&d>30){
           curDur=d;
-          const mid=d*0.33 + Math.random()*d*0.2; // chorus-ish, with variety
-          player.seekTo(mid,true);
-          player.playVideo();
+          const mid=d*0.33 + Math.random()*d*0.18;
+          try{player.seekTo(mid,true);player.playVideo();}catch(_){}
           clearInterval(seek);
-        } else if(tries>30){clearInterval(seek);}
+        } else if(tries>40){clearInterval(seek);}
       },200);
-    }catch(e){}
+    }catch(e){setStatus('couldn’t reach YouTube — try roll again');}
   }
 
   function startLoop(){if(raf)return;loop();}
   function loop(){
     raf=requestAnimationFrame(loop);
     if(!playing){energy.bass*=.9;energy.mid*=.9;energy.treble*=.9;energy.level*=.9;return;}
-    // pseudo-spectrum: a moving groove since we can't read YT frequencies
     const t=performance.now()/1000;
     beatPhase+=0.016;
-    const beat=Math.max(0,Math.sin(beatPhase*Math.PI*2*2.0));      // ~120bpm feel
+    const beat=Math.max(0,Math.sin(beatPhase*Math.PI*2*2.0));
     const swirl=(Math.sin(t*1.3)*0.5+0.5);
     for(let i=0;i<64;i++){
       const env=Math.pow(1-i/64,0.7);
@@ -611,10 +622,10 @@ const YT_ENGINE=(function(){
     energy.level +=((energy.bass*0.5+energy.mid*0.35+energy.treble*0.15)-energy.level)*0.2;
   }
 
-  function play(s){if(s)cue(s);else if(player&&ready){player.playVideo();}}
-  function pause(){if(player&&ready)player.pauseVideo();}
+  function play(s){wantPlay=true;if(s)cue(s);else if(player&&ready){try{player.unMute();player.playVideo();}catch(_){}}}
+  function pause(){wantPlay=false;if(player&&ready)try{player.pauseVideo();}catch(_){}}
   function toggle(){if(playing)pause();else play();}
-  function stop(){if(player&&ready){try{player.stopVideo();}catch(e){}}playing=false;
+  function stop(){wantPlay=false;if(player&&ready){try{player.stopVideo();}catch(e){}}playing=false;
     energy.bass=energy.mid=energy.treble=energy.level=0;}
   function isPlaying(){return playing;}
   function getFreq(){return fakeFreq;}
