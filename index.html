@@ -160,6 +160,7 @@ body::after{content:"";position:fixed;inset:0;z-index:1;pointer-events:none;opac
 </head>
 <body>
 <canvas id="bgCanvas" aria-hidden="true"></canvas>
+<div id="ytHost" style="position:fixed;width:1px;height:1px;left:-9999px;top:-9999px;opacity:0;pointer-events:none"></div>
 
 <div class="stage">
   <div class="orb-wrap" id="orbWrap">
@@ -433,33 +434,33 @@ const NEON=(function(){
   let viz=null,vctx=null;
   function loop(){
     raf=requestAnimationFrame(loop);
-    if(!analyser)return;
-    analyser.getByteFrequencyData(freqData);
-    analyser.getByteTimeDomainData(timeData);
-    // compute energy bands
-    const n=freqData.length;
-    let b=0,mm=0,tr=0;
-    const bEnd=Math.floor(n*0.12),mEnd=Math.floor(n*0.45);
-    for(let i=0;i<bEnd;i++)b+=freqData[i];
-    for(let i=bEnd;i<mEnd;i++)mm+=freqData[i];
-    for(let i=mEnd;i<n;i++)tr+=freqData[i];
-    b/=(bEnd*255);mm/=((mEnd-bEnd)*255);tr/=((n-mEnd)*255);
-    // smooth
-    energy.bass+=(b-energy.bass)*0.25;
-    energy.mid+=(mm-energy.mid)*0.25;
-    energy.treble+=(tr-energy.treble)*0.25;
-    energy.level+=((b*0.5+mm*0.35+tr*0.15)-energy.level)*0.2;
-
-    // seek + time
-    if(ctx){
+    const ytOn=(window.YT_ENGINE&&YT_ENGINE.isPlaying());
+    if(analyser){
+      analyser.getByteFrequencyData(freqData);
+      analyser.getByteTimeDomainData(timeData);
+      // compute energy bands
+      const n=freqData.length;
+      let b=0,mm=0,tr=0;
+      const bEnd=Math.floor(n*0.12),mEnd=Math.floor(n*0.45);
+      for(let i=0;i<bEnd;i++)b+=freqData[i];
+      for(let i=bEnd;i<mEnd;i++)mm+=freqData[i];
+      for(let i=mEnd;i<n;i++)tr+=freqData[i];
+      b/=(bEnd*255);mm/=((mEnd-bEnd)*255);tr/=((n-mEnd)*255);
+      energy.bass+=(b-energy.bass)*0.25;
+      energy.mid+=(mm-energy.mid)*0.25;
+      energy.treble+=(tr-energy.treble)*0.25;
+      energy.level+=((b*0.5+mm*0.35+tr*0.15)-energy.level)*0.2;
+    }
+    // seek + time (synth only; YT manages its own clock)
+    if(ctx&&!ytOn&&playing){
       const elapsed=Math.min(DUR,Math.max(0,ctx.currentTime-startT));
       const fill=document.getElementById('seekFill');if(fill)fill.style.width=(elapsed/DUR*100)+'%';
-      const pt=document.getElementById('ptime');
-      if(pt)pt.textContent='a sound made just for this track';
       if(ctx.currentTime>=stopAt){stop();return;}
     }
     draw();
   }
+  // run the visualizer continuously while a card is open (so YT audio still animates bars)
+  function startViz(){if(!raf)loop();}
   function fmt(s){const m=Math.floor(s/60),x=Math.floor(s%60);return m+':'+String(x).padStart(2,'0');}
 
   // alien creature state (persists across frames, re-seeded per song)
@@ -485,12 +486,18 @@ const NEON=(function(){
     const T=performance.now()/1000;
     const BARS=56, bw=w/BARS, mid=h/2;
     if(!peaks||peaks.length!==BARS)peaks=new Array(BARS).fill(0);
+    // Pull spectrum from the YouTube engine (real audio drives the groove).
+    // Fall back to the synth analyser if present, else a gentle idle shimmer.
+    const ytFreq=(window.YT_ENGINE)?YT_ENGINE.getFreq():null;
+    const srcFreq=ytFreq||freqData||null;
+    const srcLen=srcFreq?srcFreq.length:64;
+    const lvl=(window.YT_ENGINE)?YT_ENGINE.energy.level:(energy?energy.level:0);
 
     g.globalCompositeOperation='lighter';
     for(let i=0;i<BARS;i++){
       // sample frequency data with a slight log-ish spread, emphasize lows-mids
-      const idx=Math.floor(Math.pow(i/BARS,1.35)*freqData.length*0.85);
-      let v=freqData[idx]/255;
+      const idx=Math.floor(Math.pow(i/BARS,1.35)*srcLen*0.85);
+      let v=srcFreq?srcFreq[idx]/255:0;
       // wild factor: exaggerate + a little inter-bar shimmer
       v=Math.pow(v,0.78);
       const jitter=0.92+0.08*Math.sin(T*9+i*0.7);
@@ -517,15 +524,104 @@ const NEON=(function(){
     g.shadowBlur=0;
 
     // thin center spine that flares with overall level
-    g.fillStyle=`hsla(${vizHue},100%,75%,${0.3+energy.level*0.6})`;
+    g.fillStyle=`hsla(${vizHue},100%,75%,${0.3+lvl*0.6})`;
     g.fillRect(0,mid-1,w,2);
     g.globalCompositeOperation='source-over';
   }
 
-  return {setup,play,stop,toggle,energy,isPlaying:()=>playing,seedViz};
+  return {setup,play,stop,toggle,energy,isPlaying:()=>playing,seedViz,startViz};
 })();
 
 
+
+/* ===== YouTube audio engine =====
+   - Loads the official IFrame API (no Data API key needed)
+   - Search-loads each track with an official-studio-biased query
+   - Starts mid-song, video hidden so it's audio only
+   - Drives the reactive bars via a beat-timed pseudo-spectrum
+     (YT audio is sandboxed; true frequencies aren't readable) */
+const YT_ENGINE=(function(){
+  let player=null, ready=false, pending=null, playing=false, raf=null;
+  let curDur=0, fakeFreq=new Uint8Array(64), fakeTime=new Uint8Array(64);
+  const energy={bass:0,mid:0,treble:0,level:0};
+  let beatPhase=0;
+
+  // load the IFrame API
+  const tag=document.createElement('script');
+  tag.src='https://www.youtube.com/iframe_api';
+  document.head.appendChild(tag);
+  window.onYouTubeIframeAPIReady=function(){
+    player=new YT.Player('ytHost',{
+      height:'1',width:'1',
+      playerVars:{autoplay:0,controls:0,disablekb:1,modestbranding:1,playsinline:1,rel:0},
+      events:{
+        'onReady':()=>{ready=true;if(pending){const p=pending;pending=null;cue(p.s);}},
+        'onStateChange':e=>{
+          if(e.data===YT.PlayerState.PLAYING){playing=true;startLoop();}
+          else if(e.data===YT.PlayerState.PAUSED||e.data===YT.PlayerState.ENDED){playing=false;}
+        }
+      }
+    });
+  };
+
+  // build a query that strongly favors the official studio recording
+  function query(s){
+    // "Artist Title official audio" — YT weights this toward Topic / official uploads
+    return s.artist+' '+s.title+' official audio';
+  }
+
+  function cue(s){
+    if(!ready){pending={s};return;}
+    try{
+      player.loadPlaylist({listType:'search',list:query(s),index:0,suggestedQuality:'small'});
+      // jump to the middle once it starts; poll until duration known
+      let tries=0;
+      const seek=setInterval(()=>{
+        tries++;
+        const d=player.getDuration&&player.getDuration();
+        if(d&&d>30){
+          curDur=d;
+          const mid=d*0.33 + Math.random()*d*0.2; // chorus-ish, with variety
+          player.seekTo(mid,true);
+          player.playVideo();
+          clearInterval(seek);
+        } else if(tries>30){clearInterval(seek);}
+      },200);
+    }catch(e){}
+  }
+
+  function startLoop(){if(raf)return;loop();}
+  function loop(){
+    raf=requestAnimationFrame(loop);
+    if(!playing){energy.bass*=.9;energy.mid*=.9;energy.treble*=.9;energy.level*=.9;return;}
+    // pseudo-spectrum: a moving groove since we can't read YT frequencies
+    const t=performance.now()/1000;
+    beatPhase+=0.016;
+    const beat=Math.max(0,Math.sin(beatPhase*Math.PI*2*2.0));      // ~120bpm feel
+    const swirl=(Math.sin(t*1.3)*0.5+0.5);
+    for(let i=0;i<64;i++){
+      const env=Math.pow(1-i/64,0.7);
+      const v=(0.35+0.5*Math.sin(t*3+i*0.5)+0.4*beat)*env;
+      fakeFreq[i]=Math.max(0,Math.min(255,v*200+Math.random()*30));
+      fakeTime[i]=128+Math.sin(t*6+i*0.8)*60*(0.4+beat*0.6);
+    }
+    energy.bass +=((0.3+beat*0.6)-energy.bass)*0.2;
+    energy.mid  +=((0.25+swirl*0.4)-energy.mid)*0.2;
+    energy.treble+=((0.2+Math.random()*0.3)-energy.treble)*0.2;
+    energy.level +=((energy.bass*0.5+energy.mid*0.35+energy.treble*0.15)-energy.level)*0.2;
+  }
+
+  function play(s){if(s)cue(s);else if(player&&ready){player.playVideo();}}
+  function pause(){if(player&&ready)player.pauseVideo();}
+  function toggle(){if(playing)pause();else play();}
+  function stop(){if(player&&ready){try{player.stopVideo();}catch(e){}}playing=false;
+    energy.bass=energy.mid=energy.treble=energy.level=0;}
+  function isPlaying(){return playing;}
+  function getFreq(){return fakeFreq;}
+  function getTime(){return fakeTime;}
+
+  return {play,pause,toggle,stop,isPlaying,energy,getFreq,getTime,cue};
+})();
 
 /* ===== Oracle logic ===== */
 (function(){
@@ -533,7 +629,7 @@ const NEON=(function(){
   const orb=document.getElementById('orb'),orbWrap=document.getElementById('orbWrap');
   const reveal=document.getElementById('reveal'),card=document.getElementById('card');
   const shock=document.getElementById('shock'),orbHint=document.getElementById('orbHint');
-  let lastId=null, busy=false;
+  let lastId=null, busy=false, currentSong=null;
 
   function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
@@ -577,7 +673,7 @@ const NEON=(function(){
           <div class="seek"><i id="seekFill"></i></div>
           <button class="takeoff" id="takeoffBtn" aria-label="Take off">take off</button>
         </div>
-        <div class="ptime" id="ptime">a sound made just for this track</div>
+        <div class="ptime" id="ptime">the real track, dropped into the middle</div>
       </div>
 
       <div class="layer l4 r-notes">
@@ -595,22 +691,14 @@ const NEON=(function(){
         <div class="note"><h3>What it really means</h3><p>${esc(s.tragedy_or_meaning)}</p></div>
       </div>
 
-      <div class="spotify-embed layer l6" id="spotifyEmbed" data-q="${encodeURIComponent(s.artist+' '+s.title)}"></div>
-
       <button class="again layer l6" id="againBtn"><span class="o">◈</span> let it choose again</button>
     `;
-  }
-
-  function mountSpotify(){
-    const el=document.getElementById('spotifyEmbed');if(!el)return;
-    el.innerHTML='<iframe loading="lazy" style="border-radius:12px" '+
-      'src="https://open.spotify.com/embed/search/'+el.dataset.q+'?utm_source=generator&theme=0" '+
-      'width="100%" height="80" frameborder="0" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"></iframe>';
   }
 
   function doRoll(){
     if(busy)return;busy=true;
     const s=pickSong();
+    currentSong=s;
     // shockwave from center
     shock.classList.remove('go');void shock.offsetWidth;shock.classList.add('go');
     orbWrap.classList.add('charging');
@@ -618,26 +706,24 @@ const NEON=(function(){
     setTimeout(()=>{
       buildCard(s);
       reveal.classList.add('show');
-      // wire controls
-      NEON.setup(s);
-      // auto-play (user gesture = the orb click, so audio is allowed)
-      NEON.play();
+      // visuals: seed per song + keep the bars animating
+      NEON.seedViz(s);
+      NEON.startViz();
+      // real audio via YouTube, started mid-song (user gesture = orb click)
+      YT_ENGINE.stop();
+      YT_ENGINE.cue(s);
       const pb=document.getElementById('playBtn');
-      if(pb)pb.onclick=()=>{NEON.toggle();
-        if(NEON.isPlaying()){pb.classList.add('playing');pb.textContent='❚❚';}
+      if(pb)pb.onclick=()=>{YT_ENGINE.toggle();
+        if(YT_ENGINE.isPlaying()){pb.classList.add('playing');pb.textContent='❚❚';}
         else{pb.classList.remove('playing');pb.textContent='▶';}};
       const again=document.getElementById('againBtn');
       if(again)again.onclick=rollAgain;
       const takeoff=document.getElementById('takeoffBtn');
       if(takeoff)takeoff.onclick=()=>{
         takeoff.classList.remove('launching');void takeoff.offsetWidth;takeoff.classList.add('launching');
-        // burst a shockwave from the button and relaunch the neon signature
-        shock.classList.remove('go');void shock.offsetWidth;shock.classList.add('go');
-        NEON.play();
-        const pb=document.getElementById('playBtn');
-        if(pb){pb.classList.add('playing');pb.textContent='❚❚';}
+        // open this track in Spotify web search
+        window.open('https://open.spotify.com/search/'+encodeURIComponent(s.artist+' '+s.title),'_blank','noopener');
       };
-      mountSpotify();
       busy=false;
     },650);
   }
@@ -645,6 +731,7 @@ const NEON=(function(){
   function rollAgain(){
     if(busy)return;busy=true;
     NEON.stop();
+    YT_ENGINE.stop();
     reveal.classList.remove('show');
     setTimeout(()=>{
       card.innerHTML='';
