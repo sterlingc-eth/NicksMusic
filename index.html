@@ -261,7 +261,7 @@ const LORE = [{"id":1,"title":"And Then There Was...","artist":"Anton","album":"
    then plays it via the IFrame player hidden behind the viz.
    The NEON synth continues to drive the bars via its own analyser.
    Replace YT_API_KEY with your key. ===== */
-const YT_API_KEY = 'AIzaSyB5BYTZz1cqbuA2Xbf9KuiGM3dYOTj_LiM';
+const YT_API_KEY = 'YOUR_API_KEY_HERE';
 
 const YT_ENGINE=(function(){
   let player=null, ready=false, pending=null, playing=false;
@@ -306,25 +306,56 @@ const YT_ENGINE=(function(){
   };
 
   // Use Data API to find the best official video ID
+  // Cache video IDs so repeat plays are instant
+  const idCache={};
+
   async function findVideoId(s){
+    const key=s.artist+'|'+s.title;
+    if(idCache[key]) return idCache[key];
+
+    // Query biased toward official studio audio
     const q=encodeURIComponent(s.artist+' '+s.title+' official audio');
-    const url=`https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=5&q=${q}&key=${YT_API_KEY}`;
+    const url=`https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=10&q=${q}&key=${YT_API_KEY}`;
     try{
       const res=await fetch(url);
       if(!res.ok)throw new Error('api '+res.status);
       const data=await res.json();
       if(!data.items||!data.items.length)throw new Error('no results');
-      // prefer topic/official channels, fall back to first result
-      const official=data.items.find(i=>{
-        const ch=(i.snippet.channelTitle||'').toLowerCase();
-        return ch.includes('- topic')||ch.includes('vevo')||ch.includes('official');
-      });
-      return (official||data.items[0]).id.videoId;
+
+      // Score each result — higher = more likely to be the real studio track
+      function score(item){
+        const ch=(item.snippet.channelTitle||'').toLowerCase();
+        const title=(item.snippet.title||'').toLowerCase();
+        const artist=s.artist.toLowerCase();
+        let pts=0;
+        // Tier 1: YouTube auto-generated Topic channel (always the studio master)
+        if(ch.endsWith('- topic')) pts+=100;
+        // Tier 2: Vevo (official label channel)
+        if(ch.includes('vevo')) pts+=80;
+        // Tier 3: Artist's own channel or "official"
+        if(ch.includes('official')||ch.includes(artist)) pts+=50;
+        // Bonus: title contains "official audio" or "official music video"
+        if(title.includes('official audio')) pts+=30;
+        if(title.includes('official music video')||title.includes('official video')) pts+=20;
+        // Penalty: likely not the studio version
+        if(title.includes('live')||title.includes('concert')||title.includes('tour')) pts-=60;
+        if(title.includes('cover')||title.includes('remix')||title.includes('karaoke')) pts-=80;
+        if(title.includes('reaction')||title.includes('tutorial')||title.includes('lyrics')) pts-=40;
+        return pts;
+      }
+
+      const sorted=[...data.items].sort((a,b)=>score(b)-score(a));
+      const id=sorted[0].id.videoId;
+      idCache[key]=id;
+      return id;
     }catch(e){
       console.warn('YT search failed:',e.message);
       return null;
     }
   }
+
+  // Prefetch a video ID silently in the background
+  function prefetch(s){ if(s){ const key=s.artist+'|'+s.title; if(!idCache[key]) findVideoId(s); } }
 
   function seekMid(){
     let tries=0;
@@ -360,7 +391,7 @@ const YT_ENGINE=(function(){
   }
   function isPlaying(){return playing;}
 
-  return {cue,stop,toggle,isPlaying};
+  return {cue,stop,toggle,isPlaying,prefetch};
 })();
 
 
@@ -497,7 +528,7 @@ function initOracle(SONGS){
         <div class="r-controls">
           <button class="play-btn playing" id="playBtn" aria-label="Play / pause">❚❚</button>
           <div class="seek"><i id="seekFill"></i></div>
-          <button class="takeoff" id="takeoffBtn" aria-label="Take off">take off</button>
+          <button class="takeoff" id="takeoffBtn" aria-label="Next song">next song</button>
         </div>
         <div class="ptime" id="ptime">a sound made just for this track</div>
       </div>
@@ -517,7 +548,7 @@ function initOracle(SONGS){
         <div class="note"><h3>What it really means</h3><p>${esc(s.tragedy_or_meaning)}</p></div>
       </div>
 
-      <button class="again layer l6" id="againBtn"><span class="o">◈</span> let it choose again</button>
+      <button class="again layer l6" id="againBtn"><span class="o">◈</span> return home</button>
     `;
   }
 
@@ -527,6 +558,14 @@ function initOracle(SONGS){
     currentSong=s;
     // YouTube finds and plays the real recording
     YT_ENGINE.cue(s);
+    // Prefetch the next few random songs in the background while this one plays
+    // so the next orb press doesn't have to wait for an API call
+    setTimeout(()=>{
+      for(let i=0;i<4;i++){
+        const next=SONGS[Math.floor(Math.random()*SONGS.length)];
+        if(next&&next.title!==s.title) YT_ENGINE.prefetch(next);
+      }
+    },1500);
     // shockwave from center
     shock.classList.remove('go');void shock.offsetWidth;shock.classList.add('go');
     orbWrap.classList.add('charging');
@@ -560,17 +599,67 @@ function initOracle(SONGS){
         else{pb.classList.remove('playing');pb.textContent='▶';}
       };
       const again=document.getElementById('againBtn');
-      if(again)again.onclick=rollAgain;
+      if(again)again.onclick=returnHome;
       const takeoff=document.getElementById('takeoffBtn');
-      if(takeoff)takeoff.onclick=()=>{
-        takeoff.classList.remove('launching');void takeoff.offsetWidth;takeoff.classList.add('launching');
-        window.open('https://open.spotify.com/search/'+encodeURIComponent(s.artist+' '+s.title),'_blank','noopener');
-      };
+      if(takeoff)takeoff.onclick=()=>nextSong();
       busy=false;
     },650);
   }
 
-  function rollAgain(){
+  function nextSong(){
+    if(busy)return;busy=true;
+    // shockwave burst — same animation as the orb press
+    shock.classList.remove('go');void shock.offsetWidth;shock.classList.add('go');
+    const next=pickSong();
+    currentSong=next;
+    YT_ENGINE.stop();
+    YT_ENGINE.cue(next);
+    // prefetch more in the background
+    setTimeout(()=>{
+      for(let i=0;i<4;i++){
+        const r=SONGS[Math.floor(Math.random()*SONGS.length)];
+        if(r&&r.title!==next.title) YT_ENGINE.prefetch(r);
+      }
+    },1500);
+    // swap card content with a quick fade
+    reveal.style.opacity='0';
+    setTimeout(()=>{
+      buildCard(next);
+      // re-wire buttons for the new song
+      const pb=document.getElementById('playBtn');
+      if(pb)pb.onclick=()=>{
+        YT_ENGINE.toggle();
+        if(YT_ENGINE.isPlaying()){pb.classList.add('playing');pb.textContent='❚❚';}
+        else{pb.classList.remove('playing');pb.textContent='▶';}
+      };
+      const ag=document.getElementById('againBtn');
+      if(ag)ag.onclick=returnHome;
+      const tf=document.getElementById('takeoffBtn');
+      if(tf)tf.onclick=()=>nextSong();
+      // regenerate bars for new song
+      const vw=document.getElementById('vizWrap');
+      if(vw){
+        vw.innerHTML='';
+        const seed=next.title.split('').reduce((a,c)=>a+c.charCodeAt(0),0);
+        const hue=seed%360;
+        for(let i=0;i<56;i++){
+          const b=document.createElement('div');b.className='viz-bar';
+          const h=18+Math.abs(Math.sin((i+seed)*0.35))*86;
+          const delay=(i*0.04+Math.sin(i*0.7+seed)*0.3).toFixed(2);
+          const dur=(0.8+Math.abs(Math.sin(i*0.5+seed))*0.8).toFixed(2);
+          const bh=(hue+i*3)%360;
+          b.style.cssText=`--h:${h}px;animation-delay:${delay}s;animation-duration:${dur}s;
+            background:linear-gradient(to top,hsl(${bh},100%,55%),hsl(${(bh+60)%360},100%,70%));
+            box-shadow:0 0 6px hsl(${bh},100%,60%)`;
+          vw.appendChild(b);
+        }
+      }
+      reveal.style.opacity='1';
+      busy=false;
+    },400);
+  }
+
+  function returnHome(){
     if(busy)return;busy=true;
     YT_ENGINE.stop();
     reveal.classList.remove('show');
@@ -580,6 +669,8 @@ function initOracle(SONGS){
       busy=false;
     },600);
   }
+
+  function rollAgain(){returnHome();}// keep for keyboard shortcut compat
 
   orb.onclick=doRoll;
   // keyboard: space/enter when orb focused handled natively; allow "R" to reroll
