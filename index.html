@@ -721,21 +721,6 @@ function mergeLore(tracks){
   });
 }
 
-async function loadSongs(){
-  try{
-    const res=await fetch('playlist.csv?t='+Date.now(),{cache:'no-store'});
-    if(!res.ok) throw new Error('csv '+res.status);
-    const text=await res.text();
-    const tracks=csvToTracks(text);
-    if(tracks.length) return mergeLore(tracks);
-    throw new Error('empty csv');
-  }catch(e){
-    // fallback: use the built-in library if playlist.csv isn't present yet
-    console.warn('playlist.csv unavailable, using built-in library:', e.message);
-    return LORE;
-  }
-}
-
 /* ===== Oracle logic ===== */
 function initOracle(SONGS){
   const maxListens=Math.max(1,...SONGS.map(s=>s.listens||0));
@@ -865,7 +850,7 @@ function initOracle(SONGS){
 }
 
 /* boot: load songs (live Spotify list, else local), then start */
-loadSongs().then(initOracle);
+initOracle(LORE);
 </script>
 </body>
 </html>
