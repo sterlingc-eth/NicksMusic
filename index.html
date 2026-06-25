@@ -530,6 +530,113 @@ const NEON=(function(){
   return {setup,play,stop,toggle,energy,isPlaying:()=>playing,seedViz,startViz};
 })();
 
+/* ===== YouTube Real Audio Engine =====
+   Uses YouTube Data API v3 to find the exact official video,
+   then plays it via the IFrame player hidden behind the viz.
+   The NEON synth continues to drive the bars via its own analyser.
+   Replace YT_API_KEY with your key. ===== */
+const YT_API_KEY = 'AIzaSyB5BYTZz1cqbuA2Xbf9KuiGM3dYOTj_LiM';
+
+const YT_ENGINE=(function(){
+  let player=null, ready=false, pending=null, playing=false;
+
+  // Add hidden player host
+  const host=document.createElement('div');
+  host.id='ytHost';
+  host.style.cssText='position:fixed;width:320px;height:180px;bottom:0;left:0;opacity:0.001;pointer-events:none;z-index:-1';
+  document.body.appendChild(host);
+
+  // Load IFrame API
+  const tag=document.createElement('script');
+  tag.src='https://www.youtube.com/iframe_api';
+  document.head.appendChild(tag);
+
+  window.onYouTubeIframeAPIReady=function(){
+    player=new YT.Player('ytHost',{
+      width:'320',height:'180',
+      playerVars:{autoplay:1,controls:0,playsinline:1,rel:0,fs:0,disablekb:1},
+      events:{
+        onReady:()=>{
+          ready=true;
+          if(pending){const s=pending;pending=null;cue(s);}
+        },
+        onError:e=>{
+          // embedding disabled or removed — try next result
+          try{player.nextVideo();}catch(_){}
+        },
+        onStateChange:e=>{
+          if(e.data===YT.PlayerState.PLAYING){
+            playing=true;
+            try{player.unMute();player.setVolume(100);}catch(_){}
+          } else if(e.data===YT.PlayerState.PAUSED||e.data===YT.PlayerState.ENDED){
+            playing=false;
+          } else if(e.data===YT.PlayerState.CUED){
+            seekMid();
+            try{player.playVideo();}catch(_){}
+          }
+        }
+      }
+    });
+  };
+
+  // Use Data API to find the best official video ID
+  async function findVideoId(s){
+    const q=encodeURIComponent(s.artist+' '+s.title+' official audio');
+    const url=`https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=5&q=${q}&key=${YT_API_KEY}`;
+    try{
+      const res=await fetch(url);
+      if(!res.ok)throw new Error('api '+res.status);
+      const data=await res.json();
+      if(!data.items||!data.items.length)throw new Error('no results');
+      // prefer topic/official channels, fall back to first result
+      const official=data.items.find(i=>{
+        const ch=(i.snippet.channelTitle||'').toLowerCase();
+        return ch.includes('- topic')||ch.includes('vevo')||ch.includes('official');
+      });
+      return (official||data.items[0]).id.videoId;
+    }catch(e){
+      console.warn('YT search failed:',e.message);
+      return null;
+    }
+  }
+
+  function seekMid(){
+    let tries=0;
+    const t=setInterval(()=>{
+      tries++;
+      let d=0;try{d=player.getDuration();}catch(_){}
+      if(d>30){
+        const mid=d*0.33+Math.random()*d*0.18;
+        try{player.seekTo(mid,true);player.playVideo();}catch(_){}
+        clearInterval(t);
+      } else if(tries>40) clearInterval(t);
+    },200);
+  }
+
+  async function cue(s){
+    if(!ready){pending=s;return;}
+    const id=await findVideoId(s);
+    if(!id){console.warn('no video found for',s.title);return;}
+    try{
+      player.mute();
+      player.loadVideoById({videoId:id,suggestedQuality:'small'});
+      seekMid();
+    }catch(e){console.warn('cue error',e);}
+  }
+
+  function stop(){
+    playing=false;
+    if(player&&ready)try{player.stopVideo();}catch(_){}
+  }
+  function toggle(){
+    if(playing){try{player.pauseVideo();}catch(_){}playing=false;}
+    else{try{player.playVideo();}catch(_){}playing=true;}
+  }
+  function isPlaying(){return playing;}
+
+  return {cue,stop,toggle,isPlaying};
+})();
+
 
 
 
@@ -707,9 +814,11 @@ function initOracle(SONGS){
     if(busy)return;busy=true;
     const s=pickSong();
     currentSong=s;
-    // Start the synth IMMEDIATELY within the click gesture so audio is allowed
+    // Synth starts immediately on the click gesture — drives the bars
     NEON.setup(s);
     NEON.play();
+    // YouTube finds and plays the real recording in parallel
+    YT_ENGINE.cue(s);
     // shockwave from center
     shock.classList.remove('go');void shock.offsetWidth;shock.classList.add('go');
     orbWrap.classList.add('charging');
@@ -718,15 +827,17 @@ function initOracle(SONGS){
       buildCard(s);
       reveal.classList.add('show');
       const pb=document.getElementById('playBtn');
-      if(pb)pb.onclick=()=>{NEON.toggle();
+      if(pb)pb.onclick=()=>{
+        NEON.toggle();
+        YT_ENGINE.toggle();
         if(NEON.isPlaying()){pb.classList.add('playing');pb.textContent='❚❚';}
-        else{pb.classList.remove('playing');pb.textContent='▶';}};
+        else{pb.classList.remove('playing');pb.textContent='▶';}
+      };
       const again=document.getElementById('againBtn');
       if(again)again.onclick=rollAgain;
       const takeoff=document.getElementById('takeoffBtn');
       if(takeoff)takeoff.onclick=()=>{
         takeoff.classList.remove('launching');void takeoff.offsetWidth;takeoff.classList.add('launching');
-        // open this track in Spotify web search
         window.open('https://open.spotify.com/search/'+encodeURIComponent(s.artist+' '+s.title),'_blank','noopener');
       };
       busy=false;
@@ -736,6 +847,7 @@ function initOracle(SONGS){
   function rollAgain(){
     if(busy)return;busy=true;
     NEON.stop();
+    YT_ENGINE.stop();
     reveal.classList.remove('show');
     setTimeout(()=>{
       card.innerHTML='';
