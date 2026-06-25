@@ -801,10 +801,10 @@ function initOracle(SONGS){
     if(busy)return;busy=true;
     const s=pickSong();
     currentSong=s;
-    // Synth starts immediately on the click gesture — drives the bars
+    // Setup synth for bar-driving ONLY — do NOT play it (YouTube is the audio)
     NEON.setup(s);
-    NEON.play();
-    // YouTube finds and plays the real recording in parallel
+    NEON.startViz();
+    // YouTube finds and plays the real recording
     YT_ENGINE.cue(s);
     // shockwave from center
     shock.classList.remove('go');void shock.offsetWidth;shock.classList.add('go');
@@ -815,9 +815,8 @@ function initOracle(SONGS){
       reveal.classList.add('show');
       const pb=document.getElementById('playBtn');
       if(pb)pb.onclick=()=>{
-        NEON.toggle();
         YT_ENGINE.toggle();
-        if(NEON.isPlaying()){pb.classList.add('playing');pb.textContent='❚❚';}
+        if(YT_ENGINE.isPlaying()){pb.classList.add('playing');pb.textContent='❚❚';}
         else{pb.classList.remove('playing');pb.textContent='▶';}
       };
       const again=document.getElementById('againBtn');
