@@ -317,7 +317,9 @@ const NEON=(function(){
     analyser=ctx.createAnalyser();analyser.fftSize=512;analyser.smoothingTimeConstant=0.82;
     freqData=new Uint8Array(analyser.frequencyBinCount);
     timeData=new Uint8Array(analyser.frequencyBinCount);
-    master.connect(comp);comp.connect(analyser);analyser.connect(ctx.destination);
+    master.connect(comp);comp.connect(analyser);
+    // analyser reads the signal for the bars but doesn't connect to speakers —
+    // YouTube provides the real audio; synth runs silently as the frequency source
   }
 
   function schedule(s){
@@ -535,7 +537,7 @@ const NEON=(function(){
    then plays it via the IFrame player hidden behind the viz.
    The NEON synth continues to drive the bars via its own analyser.
    Replace YT_API_KEY with your key. ===== */
-const YT_API_KEY = 'AIzaSyB5BYTZz1cqbuA2Xbf9KuiGM3dYOTj_LiM';
+const YT_API_KEY = 'YOUR_API_KEY_HERE';
 
 const YT_ENGINE=(function(){
   let player=null, ready=false, pending=null, playing=false;
