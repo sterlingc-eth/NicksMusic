@@ -552,7 +552,20 @@ const YT_ENGINE=(function(){
   // load the IFrame API
   const tag=document.createElement('script');
   tag.src='https://www.youtube.com/iframe_api';
+  tag.onerror=function(){
+    const el=document.getElementById('ptime');
+    if(el)el.textContent='YouTube is blocked here — check extensions/network';
+  };
   document.head.appendChild(tag);
+  // watchdog: if the API never initializes, tell the user instead of dying silently
+  setTimeout(function(){
+    if(!window.YT || !window.YT.Player){
+      const el=document.getElementById('ptime');
+      if(el && document.getElementById('reveal') && document.getElementById('reveal').classList.contains('show')){
+        el.textContent='couldn’t load YouTube — try disabling ad/track blockers';
+      }
+    }
+  },6000);
   window.onYouTubeIframeAPIReady=function(){
     player=new YT.Player('ytHost',{
       height:'180',width:'320',
@@ -826,6 +839,10 @@ function initOracle(SONGS){
     if(busy)return;busy=true;
     const s=pickSong();
     currentSong=s;
+    // Kick off audio IMMEDIATELY within the click gesture (browsers require this
+    // for sound — a delayed call inside setTimeout loses the user-gesture and stays muted)
+    YT_ENGINE.stop();
+    YT_ENGINE.cue(s);
     // shockwave from center
     shock.classList.remove('go');void shock.offsetWidth;shock.classList.add('go');
     orbWrap.classList.add('charging');
@@ -836,9 +853,6 @@ function initOracle(SONGS){
       // visuals: seed per song + keep the bars animating
       NEON.seedViz(s);
       NEON.startViz();
-      // real audio via YouTube, started mid-song (user gesture = orb click)
-      YT_ENGINE.stop();
-      YT_ENGINE.cue(s);
       const pb=document.getElementById('playBtn');
       if(pb)pb.onclick=()=>{YT_ENGINE.toggle();
         if(YT_ENGINE.isPlaying()){pb.classList.add('playing');pb.textContent='❚❚';}
