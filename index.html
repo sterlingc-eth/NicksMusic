@@ -102,8 +102,9 @@ body::after{content:"";position:fixed;inset:0;z-index:1;pointer-events:none;opac
 /* viz + controls */
 .r-player{width:100%;max-width:560px;margin:24px auto 0}
 .viz-wrap{position:relative;height:120px;border:1px solid var(--line);border-radius:4px;
-  background:rgba(6,6,16,.5);overflow:hidden}
-.viz-wrap canvas{display:block;width:100%;height:100%}
+  background:rgba(6,6,16,.5);overflow:hidden;display:flex;align-items:center;justify-content:center;gap:3px;padding:0 6px}
+.viz-bar{width:5px;border-radius:3px;animation:vbar 1.2s ease-in-out infinite alternate;}
+@keyframes vbar{0%{height:6px;opacity:.3}100%{height:var(--h);opacity:.95}}
 .r-controls{display:flex;align-items:center;justify-content:center;gap:16px;margin-top:18px;flex-wrap:wrap}
 .play-btn{width:54px;height:54px;border-radius:50%;border:1px solid var(--cyan);background:var(--cyan);
   color:var(--bg);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px;
@@ -207,7 +208,7 @@ const LORE = [{"id":1,"title":"And Then There Was...","artist":"Anton","album":"
     g.addColorStop(0,`rgba(${col[0]},${col[1]},${col[2]},${a})`);g.addColorStop(1,`rgba(${col[0]},${col[1]},${col[2]},0)`);
     x.fillStyle=g;x.fillRect(0,0,innerWidth,innerHeight);}
   function frame(){t+=.006;m.x+=(m.tx-m.x)*.06;m.y+=(m.ty-m.y)*.06;
-    const E=(window.NEON&&NEON.energy)||{bass:0,level:0};
+    const E={bass:0,level:0};
     x.clearRect(0,0,W,H);x.save();x.scale(DPR,DPR);
     const cx=innerWidth*0.5+(m.x-innerWidth/2)*0.03, cy=innerHeight*0.5+(m.y-innerHeight/2)*0.03;
     // grooves radiating from center — react to bass
@@ -254,290 +255,13 @@ const LORE = [{"id":1,"title":"And Then There Was...","artist":"Anton","album":"
    - Mood (scale/tempo/timbre) derived from song metadata keywords
    - Live AnalyserNode drives bars + sabers + alien pulses + breathing ring
    - Real song audio is offered separately via the official Spotify embed */
-const NEON=(function(){
-  let ctx=null,master=null,analyser=null,freqData=null,timeData=null;
-  let playing=false,raf=null,song=null,startT=0,DUR=20,stopAt=0;
-  let nodes=[];
-  // expose live energy for the breathing ring
-  const energy={bass:0,mid:0,treble:0,level:0};
-
-  const SCALES={
-    minor:[0,2,3,5,7,8,10], dorian:[0,2,3,5,7,9,10],
-    phrygian:[0,1,3,5,7,8,10], major:[0,2,4,5,7,9,11],
-    lydian:[0,2,4,6,7,9,11], pent:[0,3,5,7,10]
-  };
-  function hash(str){let h=2166136261;for(let i=0;i<str.length;i++){h^=str.charCodeAt(i);h=Math.imul(h,16777619);}return h>>>0;}
-  function rng(seed){let s=seed>>>0;return()=>{s^=s<<13;s^=s>>>17;s^=s<<5;s>>>=0;return s/4294967296;};}
-
-  // Build a mood profile from the song's text
-  function profile(s){
-    const text=((s.tragedy_or_meaning||'')+' '+(s.song_history||'')+' '+(s.album||'')+' '+s.title).toLowerCase();
-    const has=w=>text.includes(w);
-    const seed=hash(s.title+s.artist);const r=rng(seed);
-    // base category
-    let mood={scale:'minor',tempo:96,wave:'sawtooth',bright:0.5,drive:0.4,airy:0.4,name:'synthwave'};
-    if(has('dark')||has('horror')||has('death')||has('grave')||has('demons')||has('beast')||has('rage')||has('fire')||has('overdose')||has('numb')||has('shadow')||has('grim')){
-      mood={scale:'phrygian',tempo:100,wave:'sawtooth',bright:0.32,drive:0.85,airy:0.22,name:'dark'};
-    } else if(has('float')||has('dream')||has('ambient')||has('ethereal')||has('weightless')||has('lo-fi')||has('chill')||has('peace')||has('calm')||has('healing')||has('meditat')||has('drift')){
-      mood={scale:'lydian',tempo:72,wave:'sine',bright:0.72,drive:0.18,airy:0.88,name:'ambient'};
-    } else if(has('joy')||has('dance')||has('euphor')||has('celebrat')||has('party')||has('high')||has('alegr')||has('upbeat')||has('infectious')||has('festival')||has('club')){
-      mood={scale:'major',tempo:120,wave:'square',bright:0.82,drive:0.55,airy:0.38,name:'euphoric'};
-    } else if(has('grief')||has('loss')||has('sad')||has('lonely')||has('heartbreak')||has('tragedy')||has('tears')||has('goodbye')||has('alone')||has('cry')){
-      mood={scale:'dorian',tempo:80,wave:'triangle',bright:0.45,drive:0.3,airy:0.62,name:'melancholy'};
-    } else if(has('rap')||has('drill')||has('trap')||has('hip-hop')||has('hip hop')||has('rock')||has('metal')||has('punk')){
-      mood={scale:'minor',tempo:90,wave:'sawtooth',bright:0.5,drive:0.7,airy:0.3,name:'heavy'};
-    }
-    // ---- strong per-song variation from the seed (so no two songs feel alike) ----
-    mood.tempo = Math.round(mood.tempo + (r()*2-1)*26);            // ±26 BPM
-    mood.rootKey = Math.floor(r()*12);                             // any of 12 keys
-    mood.octave = r()<0.5 ? 0 : (r()<0.6 ? -1 : 1);                // bass register varies
-    mood.bright = Math.min(1,Math.max(0.15, mood.bright+(r()*2-1)*0.3));
-    mood.drive  = Math.min(1,Math.max(0.1,  mood.drive +(r()*2-1)*0.3));
-    mood.airy   = Math.min(1,Math.max(0.1,  mood.airy  +(r()*2-1)*0.3));
-    mood.swing  = r()*0.18;                                        // groove feel
-    mood.arpStyle = Math.floor(r()*4);                             // 0..3 distinct patterns
-    mood.padVoices = r()<0.5?3:(r()<0.7?2:4);
-    mood.chordSeq = [0, Math.floor(r()*5), Math.floor(r()*6), Math.floor(r()*4)]; // unique progression
-    const altWaves=['sawtooth','square','triangle','sine'];
-    if(r()<0.4) mood.wave=altWaves[Math.floor(r()*4)];            // sometimes shift timbre
-    mood.seed=seed;
-    return mood;
-  }
-
-  function setup(s){song=s;seedViz(s);
-    const btn=document.getElementById('playBtn');
-    if(btn)btn.onclick=toggle;
-  }
-
-  function ensureCtx(){
-    if(ctx)return;
-    ctx=new (window.AudioContext||window.webkitAudioContext)();
-    master=ctx.createGain();master.gain.value=0.0;
-    const comp=ctx.createDynamicsCompressor();
-    analyser=ctx.createAnalyser();analyser.fftSize=512;analyser.smoothingTimeConstant=0.82;
-    freqData=new Uint8Array(analyser.frequencyBinCount);
-    timeData=new Uint8Array(analyser.frequencyBinCount);
-    master.connect(comp);comp.connect(analyser);
-    // analyser reads the signal for the bars but doesn't connect to speakers —
-    // YouTube provides the real audio; synth runs silently as the frequency source
-  }
-
-  function schedule(s){
-    const seed=hash(s.title+s.artist);const rand=rng(seed);
-    const m=profile(s);
-    const root=98*Math.pow(2,(m.rootKey+m.octave*12)/12); // seeded key + register
-    const scale=SCALES[m.scale];
-    const beat=60/m.tempo;
-    const now=ctx.currentTime+0.06;startT=now;stopAt=now+DUR;
-    const note=(deg,oct)=>root*Math.pow(2,oct+scale[((deg%scale.length)+scale.length)%scale.length]/12);
-
-    // master fade in/out
-    master.gain.setValueAtTime(0,now);
-    master.gain.linearRampToValueAtTime(0.9,now+0.5);
-    master.gain.setValueAtTime(0.9,stopAt-0.6);
-    master.gain.linearRampToValueAtTime(0,stopAt);
-
-    // ---- pad (sustained chord, airy) — voice count varies per song ----
-    const padGain=ctx.createGain();padGain.gain.value=0.12+m.airy*0.12;
-    const padFilter=ctx.createBiquadFilter();padFilter.type='lowpass';
-    padFilter.frequency.value=500+m.bright*2600;
-    padGain.connect(padFilter);padFilter.connect(master);nodes.push(padGain,padFilter);
-    const padDegs=[0,2,4,6].slice(0,m.padVoices);
-    padDegs.forEach((deg,i)=>{
-      const o=ctx.createOscillator();o.type=m.wave==='square'?'sawtooth':m.wave;
-      o.frequency.value=note(deg,0);o.detune.value=(i-1)*7+ (rand()*10-5);
-      const g=ctx.createGain();g.gain.value=0.45;o.connect(g);g.connect(padGain);
-      o.start(now);o.stop(stopAt+0.05);nodes.push(o,g);
-    });
-
-    // ---- bass pulse — follows this song's unique chord progression + swing ----
-    const steps=Math.floor(DUR/beat);
-    for(let i=0;i<steps;i++){
-      const t=now+i*beat + (i%2?m.swing*beat:0);
-      const o=ctx.createOscillator();o.type=m.drive>0.6?'sawtooth':'sine';
-      const deg=m.chordSeq[Math.floor(i/2)%m.chordSeq.length];
-      o.frequency.setValueAtTime(note(deg,-1),t);
-      const g=ctx.createGain();
-      const peak=0.5+m.drive*0.45;
-      g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(peak,t+0.012);
-      g.gain.exponentialRampToValueAtTime(0.001,t+beat*0.9);
-      o.connect(g);g.connect(master);o.start(t);o.stop(t+beat);nodes.push(o,g);
-    }
-
-    // ---- arp / melody — pattern shape varies per song (arpStyle) ----
-    const arpGain=ctx.createGain();arpGain.gain.value=0.16+m.bright*0.12;
-    const arpDelay=ctx.createDelay();arpDelay.delayTime.value=beat/2;
-    const fb=ctx.createGain();fb.gain.value=0.30+m.airy*0.20;
-    arpDelay.connect(fb);fb.connect(arpDelay);
-    arpGain.connect(master);arpDelay.connect(master);nodes.push(arpGain,arpDelay,fb);
-    const sub=beat/2;const asteps=Math.floor(DUR/sub);
-    // four distinct melodic shapes
-    const patterns=[
-      [0,2,4,2,0,4,2,4],     // rolling
-      [0,4,1,5,2,6,3,0],     // climbing
-      [4,3,2,1,0,1,2,3],     // descending wave
-      [0,0,3,0,5,0,2,4]      // syncopated stabs
-    ];
-    const pat=patterns[m.arpStyle];
-    for(let i=0;i<asteps;i++){
-      if(m.arpStyle!==3 && rand()<0.18)continue;
-      const t=now+i*sub + (i%2?m.swing*sub:0);
-      const deg=pat[i%pat.length] + (rand()<0.25?scale.length:0);
-      const oct=rand()<(0.3+m.bright*0.3)?2:1;
-      const o=ctx.createOscillator();o.type=m.wave;
-      o.frequency.setValueAtTime(note(deg,oct),t);
-      const g=ctx.createGain();g.gain.setValueAtTime(0,t);
-      g.gain.linearRampToValueAtTime(0.6,t+0.01);
-      g.gain.exponentialRampToValueAtTime(0.001,t+sub*0.95);
-      o.connect(g);g.connect(arpGain);g.connect(arpDelay);
-      o.start(t);o.stop(t+sub);nodes.push(o,g);
-    }
-
-    // ---- hi-hat-ish noise for drive ----
-    if(m.drive>0.4){
-      const hsteps=Math.floor(DUR/(beat/2));
-      for(let i=0;i<hsteps;i++){
-        const t=now+i*(beat/2);
-        const buf=ctx.createBuffer(1,1024,ctx.sampleRate);const d=buf.getChannelData(0);
-        for(let j=0;j<1024;j++)d[j]=(Math.random()*2-1)*Math.pow(1-j/1024,3);
-        const src=ctx.createBufferSource();src.buffer=buf;
-        const hp=ctx.createBiquadFilter();hp.type='highpass';hp.frequency.value=6000;
-        const g=ctx.createGain();g.gain.value=(i%2?0.05:0.12)*m.drive;
-        src.connect(hp);hp.connect(g);g.connect(master);src.start(t);nodes.push(src,g,hp);
-      }
-    }
-  }
-
-  function toggle(){playing?stop():play();}
-  function play(){
-    if(!song)return;ensureCtx();
-    if(ctx.state==='suspended')ctx.resume();
-    stop(true); // clear any prior
-    schedule(song);
-    playing=true;
-    const btn=document.getElementById('playBtn');if(btn){btn.classList.add('playing');btn.textContent='❚❚';}
-    const hint=document.getElementById('vizHint');if(hint)hint.classList.add('hide');
-    loop();
-  }
-  function stop(silent){
-    playing=false;
-    if(raf)cancelAnimationFrame(raf),raf=null;
-    nodes.forEach(n=>{try{n.disconnect&&n.disconnect();}catch(e){}; try{n.stop&&n.stop();}catch(e){}});
-    nodes=[];
-    if(master&&ctx){try{master.gain.cancelScheduledValues(ctx.currentTime);master.gain.setValueAtTime(0,ctx.currentTime);}catch(e){}}
-    energy.bass=energy.mid=energy.treble=energy.level=0;
-    if(!silent){
-      const btn=document.getElementById('playBtn');if(btn){btn.classList.remove('playing');btn.textContent='▶';}
-      const hint=document.getElementById('vizHint');if(hint)hint.classList.remove('hide');
-      const fill=document.getElementById('seekFill');if(fill)fill.style.width='0%';
-      const pt=document.getElementById('ptime');if(pt)pt.textContent='a sound made just for this track';
-    }
-  }
-
-  // ---- the visualizer ----
-  let viz=null,vctx=null;
-  function loop(){
-    raf=requestAnimationFrame(loop);
-    if(analyser){
-      analyser.getByteFrequencyData(freqData);
-      analyser.getByteTimeDomainData(timeData);
-      // compute energy bands
-      const n=freqData.length;
-      let b=0,mm=0,tr=0;
-      const bEnd=Math.floor(n*0.12),mEnd=Math.floor(n*0.45);
-      for(let i=0;i<bEnd;i++)b+=freqData[i];
-      for(let i=bEnd;i<mEnd;i++)mm+=freqData[i];
-      for(let i=mEnd;i<n;i++)tr+=freqData[i];
-      b/=(bEnd*255);mm/=((mEnd-bEnd)*255);tr/=((n-mEnd)*255);
-      energy.bass+=(b-energy.bass)*0.25;
-      energy.mid+=(mm-energy.mid)*0.25;
-      energy.treble+=(tr-energy.treble)*0.25;
-      energy.level+=((b*0.5+mm*0.35+tr*0.15)-energy.level)*0.2;
-    }
-    // seek bar + auto-stop at end of the synth loop
-    if(ctx&&playing){
-      const elapsed=Math.min(DUR,Math.max(0,ctx.currentTime-startT));
-      const fill=document.getElementById('seekFill');if(fill)fill.style.width=(elapsed/DUR*100)+'%';
-      if(ctx.currentTime>=stopAt){stop();return;}
-    }
-    draw();
-  }
-  function startViz(){if(!raf)loop();}
-  function fmt(s){const m=Math.floor(s/60),x=Math.floor(s%60);return m+':'+String(x).padStart(2,'0');}
-
-  // alien creature state (persists across frames, re-seeded per song)
-  let vizSeed=0,vizHue=190,peaks=null;
-  function seedViz(s){
-    vizSeed=hash(s.title);const r=rng(vizSeed);
-    vizHue=Math.floor(r()*360);
-    peaks=null; // reset falling peak caps
-  }
-
-  function draw(){
-    viz=viz||document.getElementById('vizCanvas');
-    if(!viz)return;
-    if(!vctx)vctx=viz.getContext('2d');
-    const dpr=Math.min(devicePixelRatio||1,2);
-    const w=viz.clientWidth,h=viz.clientHeight;
-    if(viz.width!==w*dpr){viz.width=w*dpr;viz.height=h*dpr;}
-    const g=vctx;g.setTransform(dpr,0,0,dpr,0,0);
-    // light trailing fade for a touch of glow-smear, but mostly clean
-    g.globalCompositeOperation='source-over';
-    g.fillStyle='rgba(6,6,14,0.38)';g.fillRect(0,0,w,h);
-
-    const T=performance.now()/1000;
-    const BARS=56, bw=w/BARS, mid=h/2;
-    if(!peaks||peaks.length!==BARS)peaks=new Array(BARS).fill(0);
-    // Bars are driven by the synth's own frequency analyser.
-    const srcFreq=freqData||null;
-    const srcLen=srcFreq?srcFreq.length:64;
-    const lvl=energy?energy.level:0;
-
-    g.globalCompositeOperation='lighter';
-    for(let i=0;i<BARS;i++){
-      // sample frequency data with a slight log-ish spread, emphasize lows-mids
-      const idx=Math.floor(Math.pow(i/BARS,1.35)*srcLen*0.85);
-      let v=srcFreq?srcFreq[idx]/255:0;
-      // wild factor: exaggerate + a little inter-bar shimmer
-      v=Math.pow(v,0.78);
-      const jitter=0.92+0.08*Math.sin(T*9+i*0.7);
-      const bh=v*mid*1.85*jitter;          // bars reach up & down from center
-      const hue=(vizHue + i/BARS*180 + T*30)%360;  // sweeping rainbow neon
-      const x=i*bw;
-
-      // mirrored bar (grows from center both ways)
-      const grd=g.createLinearGradient(0,mid-bh,0,mid+bh);
-      grd.addColorStop(0,`hsla(${hue},100%,68%,.95)`);
-      grd.addColorStop(.5,`hsla(${(hue+40)%360},100%,60%,.65)`);
-      grd.addColorStop(1,`hsla(${(hue+80)%360},100%,68%,.95)`);
-      g.fillStyle=grd;
-      g.shadowColor=`hsla(${hue},100%,60%,.9)`;g.shadowBlur=10+v*22;
-      g.fillRect(x+1,mid-bh,bw-2,bh*2);
-
-      // falling peak caps
-      if(bh>peaks[i])peaks[i]=bh; else peaks[i]=Math.max(0,peaks[i]-mid*0.012);
-      g.shadowBlur=14;
-      g.fillStyle=`hsla(${(hue+120)%360},100%,80%,.95)`;
-      g.fillRect(x+1,mid-peaks[i]-2,bw-2,2);
-      g.fillRect(x+1,mid+peaks[i],bw-2,2);
-    }
-    g.shadowBlur=0;
-
-    // thin center spine that flares with overall level
-    g.fillStyle=`hsla(${vizHue},100%,75%,${0.3+lvl*0.6})`;
-    g.fillRect(0,mid-1,w,2);
-    g.globalCompositeOperation='source-over';
-  }
-
-  return {setup,play,stop,toggle,energy,isPlaying:()=>playing,seedViz,startViz};
-})();
 
 /* ===== YouTube Real Audio Engine =====
    Uses YouTube Data API v3 to find the exact official video,
    then plays it via the IFrame player hidden behind the viz.
    The NEON synth continues to drive the bars via its own analyser.
    Replace YT_API_KEY with your key. ===== */
-const YT_API_KEY = 'YOUR_API_KEY_HERE';
+const YT_API_KEY = 'AIzaSyB5BYTZz1cqbuA2Xbf9KuiGM3dYOTj_LiM';
 
 const YT_ENGINE=(function(){
   let player=null, ready=false, pending=null, playing=false;
@@ -769,7 +493,7 @@ function initOracle(SONGS){
       <div class="layer l2 r-sub">${esc(s.album)} · ${s.year} · ${esc(s.duration||'')}</div>
 
       <div class="layer l3 r-player">
-        <div class="viz-wrap"><canvas id="vizCanvas"></canvas></div>
+        <div class="viz-wrap" id="vizWrap"></div>
         <div class="r-controls">
           <button class="play-btn playing" id="playBtn" aria-label="Play / pause">❚❚</button>
           <div class="seek"><i id="seekFill"></i></div>
@@ -801,9 +525,6 @@ function initOracle(SONGS){
     if(busy)return;busy=true;
     const s=pickSong();
     currentSong=s;
-    // Setup synth for bar-driving ONLY — do NOT play it (YouTube is the audio)
-    NEON.setup(s);
-    NEON.startViz();
     // YouTube finds and plays the real recording
     YT_ENGINE.cue(s);
     // shockwave from center
@@ -813,6 +534,25 @@ function initOracle(SONGS){
     setTimeout(()=>{
       buildCard(s);
       reveal.classList.add('show');
+      // generate animated viz bars seeded per song
+      const vw=document.getElementById('vizWrap');
+      if(vw){
+        vw.innerHTML='';
+        const seed=s.title.split('').reduce((a,c)=>a+c.charCodeAt(0),0);
+        const hue=seed%360;
+        for(let i=0;i<56;i++){
+          const b=document.createElement('div');
+          b.className='viz-bar';
+          const h=18+Math.abs(Math.sin((i+seed)*0.35))*86;
+          const delay=(i*0.04+Math.sin(i*0.7+seed)*0.3).toFixed(2);
+          const dur=(0.8+Math.abs(Math.sin(i*0.5+seed))*0.8).toFixed(2);
+          const bh=(hue+i*3)%360;
+          b.style.cssText=`--h:${h}px;animation-delay:${delay}s;animation-duration:${dur}s;
+            background:linear-gradient(to top,hsl(${bh},100%,55%),hsl(${(bh+60)%360},100%,70%));
+            box-shadow:0 0 6px hsl(${bh},100%,60%)`;
+          vw.appendChild(b);
+        }
+      }
       const pb=document.getElementById('playBtn');
       if(pb)pb.onclick=()=>{
         YT_ENGINE.toggle();
@@ -832,7 +572,6 @@ function initOracle(SONGS){
 
   function rollAgain(){
     if(busy)return;busy=true;
-    NEON.stop();
     YT_ENGINE.stop();
     reveal.classList.remove('show');
     setTimeout(()=>{
